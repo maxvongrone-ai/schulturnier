@@ -1,0 +1,1340 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>⚽ Schulturnier-Planer 2026</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+:root{--c-bg:#f0f2f5;--c-surface:#ffffff;--c-surface2:#f7f8fa;--c-border:rgba(0,0,0,.09);--c-border2:rgba(0,0,0,.18);--c-text:#111827;--c-text2:#6b7280;--c-text3:#9ca3af;--r-md:8px;--r-lg:12px;--r-xl:16px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'DM Sans',system-ui,sans-serif;background:var(--c-bg);color:var(--c-text);font-size:14px;line-height:1.5}
+input[type=text],input[type=number],input[type=time]{height:36px;padding:0 10px;border:1.5px solid #e5e7eb;border-radius:var(--r-md);font-size:14px;font-family:inherit;color:var(--c-text);background:var(--c-surface);width:100%;transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}
+button{font-family:inherit;cursor:pointer;transition:opacity .15s,transform .1s}
+button:active{transform:scale(.97)}
+#splash{display:flex;align-items:center;justify-content:center;height:100vh;font-size:15px;color:#9ca3af;gap:10px}
+#root{display:none}
+.viewer-mode{min-height:100vh;background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f172a 100%);color:#fff}
+.viewer-badge{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:3px 12px;font-size:11px;font-weight:500}
+.live-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.3);animation:pulse-dot 1.5s infinite}
+@keyframes pulse-dot{0%,100%{opacity:1;box-shadow:0 0 0 2px rgba(34,197,94,.3)}50%{opacity:.7;box-shadow:0 0 0 5px rgba(34,197,94,.1)}}
+.viewer-card{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:var(--r-xl);backdrop-filter:blur(10px)}
+.viewer-winner{background:linear-gradient(135deg,#fbbf24,#f59e0b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+</style>
+</head>
+<body>
+<div id="splash"><span style="font-size:28px">⚽</span> Lade Turnier-Planer…</div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ── URL-basierte Ansicht ───────────────────────────────────────────────
+const IS_LIVE_VIEW = window.location.hash === '#live';
+
+// ── Konfiguration ──────────────────────────────────────────────────────
+const LEVELS = [
+  { id:"vsk",  label:"Vorschule (VSK)",  short:"VSK",  hue:"#16a34a", bg:"#16a34a14", bd:"#16a34a50" },
+  { id:"kl1",  label:"1. Klasse",        short:"1.Kl", hue:"#d97706", bg:"#d9770614", bd:"#d9770650" },
+  { id:"kl2",  label:"2. Klasse",        short:"2.Kl", hue:"#ea580c", bg:"#ea580c14", bd:"#ea580c50" },
+  { id:"kl3m", label:"3. Kl. Mädchen",  short:"3M",   hue:"#9333ea", bg:"#9333ea14", bd:"#9333ea50" },
+  { id:"kl3j", label:"3. Kl. Jungen",   short:"3J",   hue:"#2563eb", bg:"#2563eb14", bd:"#2563eb50" },
+  { id:"kl4m", label:"4. Kl. Mädchen",  short:"4M",   hue:"#be185d", bg:"#be185d14", bd:"#be185d50" },
+  { id:"kl4j", label:"4. Kl. Jungen",   short:"4J",   hue:"#4338ca", bg:"#4338ca14", bd:"#4338ca50" },
+];
+const DEF_SETTINGS = { startTime:"09:00", gameDuration:8, slotBreak:3, preFinaleBreak:8, postFinaleBreak:15 };
+const DEF_TEAMS = {
+  vsk:  ["Adler","Bären","Füchse","Hasen","Löwen"],
+  kl1:  ["Blitz","Donner","Sturm","Feuer","Wind"],
+  kl2:  ["Stars","Rockets","Sharks","Hawks","Bulls"],
+  kl3m: ["Sonne","Regen","Stern","Blüte","Welle"],
+  kl3j: ["Falken","Löwen","Adler","Tiger","Wölfe"],
+  kl4m: ["Alpha","Beta","Gamma","Delta"],
+  kl4j: ["Alpha","Beta","Gamma","Delta"],
+};
+
+// ── Zeit ──────────────────────────────────────────────────────────────
+const toMin = s => { const [h,m]=s.split(":").map(Number); return h*60+m; };
+const toTime = m => `${String(Math.floor(m/60)).padStart(2,"0")}:${String(m%60).padStart(2,"0")}`;
+
+// ── Spielplan ─────────────────────────────────────────────────────────
+function effectiveTarget(nTeams,target){if(nTeams<2)return target;let t=target;if((nTeams*t)%2!==0)t++;return t;}
+
+function makePairings(teams,target){
+  if(teams.length<2)return[];
+  const n=teams.length,allPairs=[];
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)allPairs.push([teams[i],teams[j]]);
+  const shuffle=arr=>{const a=[...arr];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
+  const cnt=Object.fromEntries(teams.map(t=>[t,0])),used={},pk=(a,b)=>[a,b].sort().join("\x00"),games=[];
+  let iter=0;
+  while(teams.some(t=>cnt[t]<target)&&iter<10000){
+    iter++;
+    const cands=shuffle(allPairs).filter(([a,b])=>cnt[a]<target&&cnt[b]<target);
+    if(!cands.length)break;
+    cands.sort(([a1,b1],[a2,b2])=>(used[pk(a1,b1)]||0)-(used[pk(a2,b2)]||0));
+    const[a,b]=cands[0];
+    games.push({id:"g"+games.length,home:a,away:b});
+    cnt[a]++;cnt[b]++;const k=pk(a,b);used[k]=(used[k]||0)+1;
+  }
+  for(let at=0;at<500&&teams.some(t=>cnt[t]<target);at++){
+    const needy=teams.filter(t=>cnt[t]<target);if(needy.length<2)break;
+    const a=needy[0],partner=needy.slice(1).sort((x,y)=>(used[pk(a,x)]||0)-(used[pk(a,y)]||0))[0];
+    if(!partner)break;
+    games.push({id:"g"+games.length,home:a,away:partner});cnt[a]++;cnt[partner]++;
+    const k=pk(a,partner);used[k]=(used[k]||0)+1;
+  }
+  return games;
+}
+
+function makeRounds(games,teams){
+  const rem=[...games],rounds=[];
+  const inRound=(t,ri)=>ri>=0&&ri<rounds.length&&rounds[ri].some(g=>g.home===t||g.away===t);
+  while(rem.length>0){
+    const ri=rounds.length,slot=[],busy=new Set();
+    const blocked=new Set(teams.filter(t=>inRound(t,ri-1)&&inRound(t,ri-2)));
+    for(const relaxed of[false,true]){
+      for(const g of rem){
+        if(slot.length>=3)break;
+        if(busy.has(g.home)||busy.has(g.away))continue;
+        if(!relaxed&&(blocked.has(g.home)||blocked.has(g.away)))continue;
+        slot.push(g);busy.add(g.home);busy.add(g.away);
+      }
+      if(slot.length>=3)break;
+    }
+    if(!slot.length)break;
+    rounds.push(slot);slot.forEach(g=>rem.splice(rem.indexOf(g),1));
+  }
+  return rounds;
+}
+
+function buildSchedule(teamsMap,settings,gamesPerTeam={},withFinale={},gameDurOverride={}){
+  let t=toMin(settings.startTime);
+  const{slotBreak:sb,preFinaleBreak:pb,postFinaleBreak:cb}=settings;
+  const result={};
+  for(const lvl of LEVELS){
+    const teams=(teamsMap[lvl.id]||[]).filter(x=>x.trim());
+    if(teams.length<2){result[lvl.id]=null;continue;}
+    const target=effectiveTarget(teams.length,Math.max(1,gamesPerTeam[lvl.id]||4));
+    const lvlGd=Math.max(1,gameDurOverride[lvl.id]||settings.gameDuration);
+    const hasFin=withFinale[lvl.id]!==false;
+    const games=makePairings(teams,target);
+    const rawRounds=makeRounds(games,teams);
+    let lt=t;
+    const rounds=rawRounds.map((gs,i)=>{const start=lt;lt+=lvlGd;if(i<rawRounds.length-1)lt+=sb;return{start,games:gs};});
+    let finaleStart=null;
+    if(hasFin){lt+=pb;finaleStart=lt;lt+=lvlGd;}
+    const nextStart=lt+cb;
+    result[lvl.id]={games,rounds,finaleStart,nextStart,hasFinale:hasFin,gameDuration:lvlGd};
+    t=nextStart;
+  }
+  return result;
+}
+
+// ── Tabelle: nur Punkte → Tordiff → Tore (kein H2H mehr) ─────────────
+function getStandings(teams,games,scores={}){
+  const s=Object.fromEntries(teams.map(t=>[t,{pts:0,w:0,d:0,l:0,gf:0,ga:0,p:0}]));
+  for(const g of games){
+    const sc=scores[g.id];
+    if(!sc||sc.h==null||sc.h===""||sc.a==null||sc.a==="")continue;
+    const[hg,ag]=[+sc.h,+sc.a];if(isNaN(hg)||isNaN(ag))continue;
+    s[g.home].gf+=hg;s[g.home].ga+=ag;s[g.home].p++;
+    s[g.away].gf+=ag;s[g.away].ga+=hg;s[g.away].p++;
+    if(hg>ag){s[g.home].w++;s[g.home].pts+=3;s[g.away].l++;}
+    else if(hg<ag){s[g.away].w++;s[g.away].pts+=3;s[g.home].l++;}
+    else{s[g.home].d++;s[g.away].d++;s[g.home].pts++;s[g.away].pts++;}
+  }
+  const rows=Object.entries(s).map(([name,x])=>({name,...x,gd:x.gf-x.ga}));
+  rows.sort((a,b)=>{
+    if(b.pts!==a.pts)return b.pts-a.pts;
+    if(b.gd!==a.gd)return b.gd-a.gd;
+    if(b.gf!==a.gf)return b.gf-a.gf;
+    return a.name.localeCompare(b.name); // stabil bei echtem Gleichstand
+  });
+  return rows;
+}
+
+// ── Entscheidungsspiel-Erkennung ──────────────────────────────────────
+// Nur wenn 2. und 3. (und ggf. mehr) vollständig gleich sind (Pkt + Tordiff + Tore).
+// 1. Platz ist immer klar. Tiebreaker bestimmt nur den 2. Finalisten.
+// ── Entscheidungsspiel-Erkennung ──────────────────────────────────────
+// Regeln:
+//  • 1. Platz geht direkt ins Finale – ES SEI DENN er ist mit mind. 2 weiteren
+//    Teams punktgleich/tordiff-/torgleich → dann alle ins Penalty (3-Wege+).
+//  • Ist 1. klar, aber 2. und 3. (und ggf. mehr) gleich → Entscheidungsspiel
+//    (2 Teams) oder Penalty (3+ Teams) um den 2. Finalistenplatz.
+//  • Bei 2-Wege-Gleichstand an der Spitze (nur 1. und 2. gleich) → kein
+//    Tiebreaker, beide gehen direkt ins Finale.
+function detectTiebreaker(st){
+  if(!st||st.length<2)return null;
+  const same=(a,b)=>a.pts===b.pts&&a.gd===b.gd&&a.gf===b.gf;
+
+  // Gruppe der Teams, die mit Platz 1 gleichstehen
+  const topGroup=st.filter(t=>same(t,st[0]));
+
+  if(topGroup.length>=3){
+    // 3-Wege+ Gleichstand an der Spitze inkl. Platz 1
+    // → Penalty zwischen ALLEN, bestimmt Finalisten 1 + 2
+    return{teams:topGroup.map(t=>t.name),type:"penalty",includesFirst:true};
+  }
+  // topGroup.length == 1 oder 2
+  // Bei 2-Wege-Gleichstand (Platz 1 + 2 gleich, Platz 3 verschieden):
+  //   → beide gehen direkt ins Finale, kein Tiebreaker nötig
+  // Jetzt prüfen ob es einen Gleichstand um den 2. Finalistenplatz gibt
+  // (ab Position topGroup.length aufwärts)
+  const secondStart=topGroup.length; // Index des "zweiten Blocks"
+  if(secondStart>=st.length-1)return null; // kein 3. Team vorhanden
+  const ref=st[secondStart];
+  const secondGroup=st.slice(secondStart).filter(t=>same(t,ref));
+  if(secondGroup.length<2)return null; // kein Gleichstand
+  return{
+    teams:secondGroup.map(t=>t.name),
+    type:secondGroup.length===2?"match":"penalty",
+    includesFirst:false
+  };
+}
+
+// ── Penalty-Ergebnis ermitteln ─────────────────────────────────────────
+// Gibt { winner, finalist } zurück.
+// Regel: Sobald jedes Team mindestens 3 Schüsse hat, kann entschieden werden.
+// Teams müssen NICHT gleich viele Schüsse haben.
+//
+// includesFirst=false (1 Finalist gesucht):
+//   → winner klar, wenn Platz 1 strikt mehr Treffer hat als Platz 2
+//
+// includesFirst=true (2 Finalisten gesucht):
+//   → Genau 2 Teams an der Spitze gleichauf (und vor allen anderen): beide ins Finale
+//   → Platz 1 allein vorne + Platz 2 strikt vor Platz 3: winner + finalist
+//   → 3+ Teams gleichauf ganz oben: noch nicht entschieden
+function determinePenaltyResults(teams,penScores,includesFirst=false){
+  const data=teams.map(n=>({name:n,goals:penScores[n]?.goals||0,shots:penScores[n]?.shots||0}));
+  // Jedes Team muss mind. 3 Schüsse haben
+  if(!data.every(d=>d.shots>=3))return{winner:null,finalist:null};
+  const sorted=[...data].sort((a,b)=>b.goals-a.goals);
+
+  if(includesFirst){
+    // Wie viele Teams teilen sich Platz 1?
+    const topGoals=sorted[0].goals;
+    const topCount=sorted.filter(d=>d.goals===topGoals).length;
+    if(topCount===2){
+      // Genau 2 Teams gleichauf an der Spitze → beide qualifiziert (sie liegen vor allen anderen)
+      return{winner:sorted[0].name,finalist:sorted[1].name};
+    }
+    if(topCount===1){
+      // Klarer Erstplatzierter → Platz 2 muss strikt vor Platz 3 liegen
+      const finalist=(sorted.length<3||sorted[1].goals>sorted[2].goals)?sorted[1].name:null;
+      return{winner:sorted[0].name,finalist};
+    }
+    // topCount >= 3: zu viele Teams gleichauf → noch nicht entschieden
+    return{winner:null,finalist:null};
+  }else{
+    // 1 Finalist gesucht → strikter Vorsprung nötig
+    const winner=sorted[0].goals>sorted[1].goals?sorted[0].name:null;
+    if(!winner)return{winner:null,finalist:null};
+    const finalist=(sorted.length<3||sorted[1].goals>sorted[2].goals)?sorted[1].name:null;
+    return{winner,finalist};
+  }
+}
+
+// Kurzform: nur Sieger (für Tiebreaker ohne includesFirst)
+function determinePenaltyWinner(teams,penScores){
+  return determinePenaltyResults(teams,penScores,false).winner;
+}
+
+// ── Finalisten ermitteln ──────────────────────────────────────────────
+function getFinalists(st,tbInfo,tbScore,penScores){
+  if(!st||st.length<2)return{f1:"Platz 1",f2:"Platz 2",tbPending:false};
+  if(!tbInfo){
+    // Kein Tiebreaker – 1. und 2. direkt ins Finale
+    return{f1:st[0]?.name||"Platz 1",f2:st[1]?.name||"Platz 2",tbPending:false};
+  }
+  if(tbInfo.type==="match"){
+    // Immer nur um Platz 2 → f1 ist klar
+    const f1=st[0]?.name||"Platz 1";
+    const ok=tbScore?.h!=null&&tbScore?.h!==""&&tbScore?.a!=null&&tbScore?.a!=="";
+    if(!ok)return{f1,f2:"?",tbPending:true};
+    const w=+tbScore.h>+tbScore.a?tbInfo.teams[0]:+tbScore.h<+tbScore.a?tbInfo.teams[1]:null;
+    return{f1,f2:w||"?",tbPending:!w};
+  }
+  if(tbInfo.type==="penalty"){
+    if(tbInfo.includesFirst){
+      // Platz 1 ist im Penalty → Penalty bestimmt BEIDE Finalisten
+      const{winner,finalist}=determinePenaltyResults(tbInfo.teams,penScores||{},true);
+      return{f1:winner||"?",f2:finalist||"?",tbPending:!winner||!finalist};
+    } else {
+      // Nur Platz 2 umkämpft → f1 ist klar
+      const f1=st[0]?.name||"Platz 1";
+      const{winner}=determinePenaltyResults(tbInfo.teams,penScores||{});
+      return{f1,f2:winner||"?",tbPending:!winner};
+    }
+  }
+  return{f1:st[0]?.name||"Platz 1",f2:st[1]?.name||"Platz 2",tbPending:false};
+}
+
+// ── Firebase: dynamisches Setup ───────────────────────────────────────
+const FB_CONFIG_KEY="schulturnier_fb_config";
+let TURNIER_REF=null;
+let FB_READY=false;
+
+function getStoredConfig(){try{return JSON.parse(localStorage.getItem(FB_CONFIG_KEY));}catch{return null;}}
+
+function initFirebase(cfg){
+  try{
+    if(!firebase.apps||!firebase.apps.length)firebase.initializeApp(cfg);
+    TURNIER_REF=firebase.database().ref("turnier2026");
+    FB_READY=true;return true;
+  }catch(e){console.warn("Firebase init error:",e);return false;}
+}
+
+// Beim Laden: gespeicherte Config versuchen
+const _storedCfg=getStoredConfig();
+if(_storedCfg)initFirebase(_storedCfg);
+
+// ── Persistenz (Firebase Realtime Database) ───────────────────────────
+async function loadState(){
+  if(!FB_READY||!TURNIER_REF)return null;
+  try{const snap=await TURNIER_REF.once("value");return snap.val();}
+  catch(e){console.warn("Firebase load error:",e);return null;}
+}
+function saveState(st){
+  if(!FB_READY||!TURNIER_REF)return;
+  try{TURNIER_REF.set(st);}catch(e){console.warn("Firebase save error:",e);}
+}
+
+// ── Firebase Setup-Screen ─────────────────────────────────────────────
+function FirebaseSetup({onDone}){
+  const[raw,setRaw]=useState("");
+  const[err,setErr]=useState("");
+  const[testing,setTesting]=useState(false);
+
+  async function handleConnect(){
+    setErr("");setTesting(true);
+    try{
+      let txt=raw.trim();
+      const m=txt.match(/\{[\s\S]*\}/);
+      if(m)txt=m[0];
+      // Einfache JS-zu-JSON Konvertierung: Schlüssel in Anführungszeichen
+      txt=txt.replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g,'$1"$2":');
+      const cfg=JSON.parse(txt);
+      if(!cfg.apiKey||!cfg.databaseURL){setErr("apiKey und databaseURL fehlen – bitte den kompletten firebaseConfig-Block einfügen.");setTesting(false);return;}
+      localStorage.setItem(FB_CONFIG_KEY,JSON.stringify(cfg));
+      const ok=initFirebase(cfg);
+      if(ok){
+        // Verbindungstest
+        try{await TURNIER_REF.once("value");}catch(e){setErr("Verbindung fehlgeschlagen: "+e.message);setTesting(false);return;}
+        onDone();
+      }else{setErr("Firebase konnte nicht initialisiert werden. Config prüfen.");}
+    }catch(e){setErr("Format nicht erkannt. Bitte den kompletten firebaseConfig-Block einfügen.\n("+e.message+")");}
+    setTesting(false);
+  }
+
+  return(
+    <div style={{minHeight:"100vh",background:"#f0f2f5",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#fff",borderRadius:16,padding:32,maxWidth:520,width:"100%",boxShadow:"0 4px 32px rgba(0,0,0,.10)"}}>
+        <div style={{fontSize:32,marginBottom:8}}>🔥</div>
+        <h2 style={{fontSize:20,fontWeight:700,marginBottom:6}}>Firebase verbinden</h2>
+        <p style={{color:"#6b7280",fontSize:13,marginBottom:20,lineHeight:1.6}}>
+          Einmalige Einrichtung: Kopiere den <strong>firebaseConfig-Block</strong> aus der Firebase Console und füge ihn hier ein. Danach funktioniert die Live-Synchronisation auf allen Geräten.
+        </p>
+
+        <div style={{background:"#f8fafc",border:"1.5px solid #e2e8f0",borderRadius:10,padding:14,marginBottom:16,fontSize:12,color:"#475569",lineHeight:1.7}}>
+          <strong>Wo finde ich den Block?</strong><br/>
+          Firebase Console → ⚙ Projekteinstellungen → Tab „Allgemein"<br/>
+          → ganz unten: „Meine Apps" → Web-App anklicken<br/>
+          → <strong>„SDK-Einrichtung und Konfiguration"</strong> → Radio: <em>„Config"</em><br/>
+          → den <code style={{background:"#e2e8f0",padding:"1px 5px",borderRadius:4}}>firebaseConfig = &#123;…&#125;</code>-Block kopieren
+        </div>
+
+        <textarea
+          value={raw}
+          onChange={e=>setRaw(e.target.value)}
+          placeholder={`Hier einfügen, z. B.:\n\nconst firebaseConfig = {\n  apiKey: "AIzaSy...",\n  authDomain: "...",\n  databaseURL: "https://...",\n  ...\n};`}
+          style={{width:"100%",height:180,padding:12,borderRadius:8,border:"1.5px solid #e5e7eb",fontFamily:"monospace",fontSize:12,resize:"vertical",outline:"none",color:"#1e293b",background:"#f8fafc"}}
+        />
+        {err&&<div style={{color:"#dc2626",fontSize:12,marginTop:8,padding:"8px 12px",background:"#fef2f2",borderRadius:6,whiteSpace:"pre-wrap"}}>{err}</div>}
+        <button
+          onClick={handleConnect}
+          disabled={testing||!raw.trim()}
+          style={{marginTop:14,width:"100%",height:44,borderRadius:8,border:"none",background:testing||!raw.trim()?"#d1d5db":"#2563eb",color:"#fff",fontWeight:600,fontSize:14,cursor:testing||!raw.trim()?"not-allowed":"pointer"}}>
+          {testing?"⏳ Verbinde…":"✓ Verbinden &amp; starten"}
+        </button>
+        <p style={{textAlign:"center",marginTop:12,fontSize:11,color:"#9ca3af"}}>Die Konfiguration wird lokal gespeichert – du musst das nur einmal machen.</p>
+      </div>
+    </div>
+  );
+}
+
+// ── App ────────────────────────────────────────────────────────────────
+function App(){
+  const[ready,setReady]=useState(false);
+  const[tab,setTab]=useState("setup");
+  const[settings,setSettings]=useState(DEF_SETTINGS);
+  const[teams,setTeams]=useState(DEF_TEAMS);
+  const[schedule,setSchedule]=useState(null);
+  const[scores,setScores]=useState({});
+  const[fScores,setFScores]=useState({});
+  const[tbScores,setTbScores]=useState({});       // Entscheidungsspiel-Ergebnisse
+  const[penScores,setPenScores]=useState({});     // Penalty-Shoot-out
+  const[roundDelays,setRoundDelays]=useState({}); // Verzögerungen je Runde
+  const[editLvl,setEditLvl]=useState("vsk");
+  const[newTeam,setNewTeam]=useState({});
+  const[collapsed,setCollapsed]=useState({});
+  const[gamesPerTeam,setGamesPerTeam]=useState(Object.fromEntries(LEVELS.map(l=>[l.id,4])));
+  const[withFinale,setWithFinale]=useState(Object.fromEntries(LEVELS.map(l=>[l.id,true])));
+  const[gameDurOverride,setGameDurOverride]=useState({});
+  const[showLiveUrl,setShowLiveUrl]=useState(false);
+  const saveTimer=useRef(null);
+
+  useEffect(()=>{
+    loadState().then(saved=>{
+      if(saved){
+        if(saved.settings)setSettings(p=>({...p,...saved.settings}));
+        if(saved.teams)setTeams(p=>({...p,...saved.teams}));
+        if(saved.scores)setScores(saved.scores);
+        if(saved.fScores)setFScores(saved.fScores);
+        if(saved.tbScores)setTbScores(saved.tbScores);
+        if(saved.penScores)setPenScores(saved.penScores);
+        if(saved.roundDelays)setRoundDelays(saved.roundDelays);
+        if(saved.schedule)setSchedule(saved.schedule);
+        if(saved.gamesPerTeam)setGamesPerTeam(p=>({...p,...saved.gamesPerTeam}));
+        if(saved.withFinale)setWithFinale(p=>({...p,...saved.withFinale}));
+        if(saved.gameDurOverride)setGameDurOverride(saved.gameDurOverride);
+      }
+      document.getElementById("splash").style.display="none";
+      document.getElementById("root").style.display="block";
+      setReady(true);
+    });
+  },[]);
+
+  // Live-View: Echtzeit-Updates via Firebase
+  useEffect(()=>{
+    if(!IS_LIVE_VIEW||!ready)return;
+    const handler=TURNIER_REF.on("value",snap=>{
+      const saved=snap.val();
+      if(!saved)return;
+      if(saved.scores)setScores(saved.scores);
+      if(saved.fScores)setFScores(saved.fScores);
+      if(saved.tbScores)setTbScores(saved.tbScores);
+      if(saved.penScores)setPenScores(saved.penScores);
+      if(saved.schedule)setSchedule(saved.schedule);
+      if(saved.roundDelays)setRoundDelays(saved.roundDelays);
+    });
+    return()=>TURNIER_REF.off("value",handler);
+  },[ready]);
+
+  // Autosave
+  useEffect(()=>{
+    if(!ready||IS_LIVE_VIEW)return;
+    if(saveTimer.current)clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>saveState({settings,teams,scores,fScores,tbScores,penScores,roundDelays,schedule,gamesPerTeam,withFinale,gameDurOverride}),1000);
+    return()=>{if(saveTimer.current)clearTimeout(saveTimer.current);};
+  },[ready,settings,teams,scores,fScores,tbScores,penScores,roundDelays,schedule,gamesPerTeam,withFinale,gameDurOverride]);
+
+  const generate=useCallback(()=>{
+    setSchedule(buildSchedule(teams,settings,gamesPerTeam,withFinale,gameDurOverride));
+    setScores({});setFScores({});setTbScores({});setPenScores({});setRoundDelays({});
+    setTab("schedule");
+  },[teams,settings,gamesPerTeam,withFinale,gameDurOverride]);
+
+  const setScore=useCallback((lvlId,gid,side,val)=>setScores(p=>({...p,[lvlId]:{...p[lvlId],[gid]:{...(p[lvlId]?.[gid]||{}),[side]:val}}})),[]);
+  const setFScore=useCallback((lvlId,side,val)=>setFScores(p=>({...p,[lvlId]:{...(p[lvlId]||{}),[side]:val}})),[]);
+  const setTbScore=useCallback((lvlId,side,val)=>setTbScores(p=>({...p,[lvlId]:{...(p[lvlId]||{}),[side]:val}})),[]);
+  const setPenScore=useCallback((lvlId,teamName,field,val)=>setPenScores(p=>({
+    ...p,[lvlId]:{...(p[lvlId]||{}),[teamName]:{...(p[lvlId]?.[teamName]||{goals:0,shots:0}),[field]:Math.max(0,+val||0)}}
+  })),[]);
+  const setRoundDelay=useCallback((lvlId,ri,minutes)=>setRoundDelays(p=>{
+    const cur=p[lvlId]||[];const upd=[...cur];upd[ri]=Math.max(0,minutes||0);
+    return{...p,[lvlId]:upd};
+  }),[]);
+
+  // Tabellen
+  const standings=useMemo(()=>{
+    if(!schedule)return{};
+    return Object.fromEntries(LEVELS.map(lvl=>{
+      const s=schedule[lvl.id];if(!s)return[lvl.id,[]];
+      const ts=[...new Set(s.games.flatMap(g=>[g.home,g.away]))];
+      return[lvl.id,getStandings(ts,s.games,scores[lvl.id]||{})];
+    }));
+  },[schedule,scores]);
+
+  // Entscheidungsspiel-Bedarf
+  const tiebreakerInfo=useMemo(()=>{
+    if(!schedule)return{};
+    return Object.fromEntries(LEVELS.map(l=>{
+      const s=schedule[l.id];
+      if(!s||!s.hasFinale)return[l.id,null];
+      const st=standings[l.id]||[];
+      const sc=scores[l.id]||{};
+      const allDone=s.games.length>0&&s.games.every(g=>{const r=sc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";});
+      if(!allDone)return[l.id,null];
+      return[l.id,detectTiebreaker(st)];
+    }));
+  },[schedule,standings,scores]);
+
+  // Zeitverschiebungen (Verzögerungen + Entscheidungsspiele)
+  const scheduleOffsets=useMemo(()=>{
+    if(!schedule)return{};
+    let cumulative=0;
+    const result={};
+    for(const l of LEVELS){
+      const s=schedule[l.id];
+      if(!s){result[l.id]={base:cumulative,rounds:[],finale:cumulative};continue;}
+      const delays=roundDelays[l.id]||[];
+      let localAcc=0;
+      const roundOffs=s.rounds.map((_,ri)=>{const o=cumulative+localAcc;localAcc+=delays[ri]||0;return o;});
+      result[l.id]={base:cumulative,rounds:roundOffs,finale:cumulative+localAcc};
+      const gd=s.gameDuration||settings.gameDuration;
+      const tbExtra=tiebreakerInfo[l.id]?(gd+settings.slotBreak):0;
+      cumulative+=localAcc+tbExtra;
+    }
+    return result;
+  },[schedule,roundDelays,tiebreakerInfo,settings]);
+
+  const toggleCollapse=id=>setCollapsed(p=>({...p,[id]:!p[id]}));
+  const liveUrl=window.location.origin+window.location.pathname+'#live';
+
+  if(!ready)return null;
+
+  if(IS_LIVE_VIEW)return(
+    <ViewerMode schedule={schedule} scores={scores} fScores={fScores}
+      standings={standings} settings={settings} tbScores={tbScores}
+      penScores={penScores} tiebreakerInfo={tiebreakerInfo}
+      scheduleOffsets={scheduleOffsets} standalone={true} onExit={null}/>
+  );
+
+  return(
+    <div style={{minHeight:"100vh",background:"var(--c-bg)"}}>
+      <div style={{background:"#1e3a8a",color:"#fff",padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+        <div>
+          <div style={{fontWeight:600,fontSize:17,letterSpacing:-.3}}>⚽ Schulturnier-Planer 2026</div>
+          <div style={{fontSize:11,opacity:.75,marginTop:1}}>27. Juni 2026 · 3 Felder · 7 Klassenstufen</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {schedule&&<div style={{fontSize:11,background:"rgba(255,255,255,.18)",padding:"3px 12px",borderRadius:20,fontWeight:500}}>Spielplan aktiv ✓</div>}
+          <div style={{position:"relative"}}>
+            <button onClick={()=>setShowLiveUrl(p=>!p)}
+              style={{padding:"6px 13px",background:"rgba(255,255,255,.15)",border:"1.5px solid rgba(255,255,255,.35)",color:"#fff",borderRadius:20,fontSize:12,fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
+              <span>🔗</span> Live-URL
+            </button>
+            {showLiveUrl&&(
+              <div style={{position:"absolute",right:0,top:"100%",marginTop:6,background:"#fff",borderRadius:10,padding:14,boxShadow:"0 8px 32px rgba(0,0,0,.2)",width:320,zIndex:200}}>
+                <div style={{fontSize:11,fontWeight:600,color:"#6b7280",marginBottom:6}}>🌐 Öffentliche Live-Ansicht (URL)</div>
+                <div style={{fontSize:11,color:"#6b7280",marginBottom:8,lineHeight:1.5}}>Öffentliche Live-Ansicht für Zuschauer – funktioniert auf <strong>jedem Gerät</strong>, überall. Ergebnisse werden in Echtzeit via Firebase übertragen.</div>
+                <div style={{display:"flex",gap:6}}>
+                  <input type="text" readOnly value={liveUrl}
+                    style={{fontSize:11,color:"#1d4ed8",background:"#eff6ff",border:"1px solid #bfdbfe",height:32,padding:"0 8px"}}
+                    onClick={e=>{e.target.select();}}/>
+                  <button onClick={()=>navigator.clipboard?.writeText(liveUrl)}
+                    style={{height:32,padding:"0 10px",background:"#2563eb",color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:500,whiteSpace:"nowrap"}}>Kopieren</button>
+                </div>
+                <button onClick={()=>window.open(liveUrl,"_blank")}
+                  style={{marginTop:8,width:"100%",padding:"7px 0",background:"#eff6ff",border:"1px solid #bfdbfe",color:"#1d4ed8",borderRadius:6,fontSize:12,fontWeight:500}}>
+                  In neuem Tab öffnen ↗
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:"var(--c-surface)",borderBottom:"1px solid var(--c-border)",display:"flex"}}>
+        {[["setup","⚙ Einrichtung"],["schedule","📋 Spielplan"]].map(([id,lbl])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{padding:"10px 22px",border:"none",background:"none",fontSize:13,fontWeight:tab===id?600:400,color:tab===id?"#1d4ed8":"var(--c-text2)",borderBottom:tab===id?"2.5px solid #1d4ed8":"2.5px solid transparent",marginBottom:-1}}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      <div style={{maxWidth:980,margin:"0 auto",padding:16}}>
+        {tab==="setup"&&(
+          <SetupTab settings={settings} setSettings={setSettings}
+            teams={teams} setTeams={setTeams} editLvl={editLvl} setEditLvl={setEditLvl}
+            newTeam={newTeam} setNewTeam={setNewTeam}
+            gamesPerTeam={gamesPerTeam} setGamesPerTeam={setGamesPerTeam}
+            withFinale={withFinale} setWithFinale={setWithFinale}
+            gameDurOverride={gameDurOverride} setGameDurOverride={setGameDurOverride}
+            onGenerate={generate}/>
+        )}
+        {tab==="schedule"&&!schedule&&(
+          <div style={{textAlign:"center",padding:56,color:"var(--c-text2)"}}>
+            <div style={{fontSize:48,marginBottom:10}}>📋</div>
+            <div style={{fontSize:16,color:"var(--c-text)",marginBottom:6,fontWeight:500}}>Noch kein Spielplan erstellt</div>
+            <button onClick={()=>setTab("setup")} style={{padding:"9px 22px",background:"#2563eb",color:"#fff",border:"none",borderRadius:"var(--r-md)",fontWeight:600,marginTop:12}}>Zur Einrichtung →</button>
+          </div>
+        )}
+        {tab==="schedule"&&schedule&&(
+          <ScheduleView schedule={schedule} settings={settings}
+            scores={scores} fScores={fScores} tbScores={tbScores} penScores={penScores}
+            tiebreakerInfo={tiebreakerInfo} roundDelays={roundDelays}
+            scheduleOffsets={scheduleOffsets} standings={standings}
+            collapsed={collapsed} onToggle={toggleCollapse}
+            onScore={setScore} onFScore={setFScore} onTbScore={setTbScore}
+            onPenScore={setPenScore} onRoundDelay={setRoundDelay} onRegen={generate}/>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Setup Tab ──────────────────────────────────────────────────────────
+function SetupTab({settings,setSettings,teams,setTeams,editLvl,setEditLvl,newTeam,setNewTeam,
+                   gamesPerTeam,setGamesPerTeam,withFinale,setWithFinale,
+                   gameDurOverride,setGameDurOverride,onGenerate}){
+  const lvl=LEVELS.find(l=>l.id===editLvl);
+  const nTeams=(teams[editLvl]||[]).filter(x=>x.trim()).length;
+  const rawGpt=gamesPerTeam[editLvl]||4;
+  const effGpt=effectiveTarget(nTeams,rawGpt);
+  const gptWarn=nTeams>=2&&effGpt!==rawGpt;
+  const lvlGd=gameDurOverride[editLvl]||settings.gameDuration;
+  const addTeam=()=>{const name=(newTeam[editLvl]||"").trim();if(!name)return;setTeams(p=>({...p,[editLvl]:[...(p[editLvl]||[]),name]}));setNewTeam(p=>({...p,[editLvl]:""}));};
+
+  return(
+    <div>
+      <div style={{background:"var(--c-surface)",borderRadius:"var(--r-xl)",border:"1px solid var(--c-border)",padding:"16px 18px",marginBottom:14}}>
+        <div style={{fontWeight:600,fontSize:14,marginBottom:14}}>⚙ Globale Turniereinstellungen</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:12}}>
+          {[["startTime","Startzeit","time"],["gameDuration","Spielzeit (Min.)","number"],["slotBreak","Pause zw. Runden","number"],["preFinaleBreak","Pause vor Finale","number"],["postFinaleBreak","Siegerehrung (Min.)","number"]].map(([k,lbl,tp])=>(
+            <label key={k} style={{display:"flex",flexDirection:"column",gap:4}}>
+              <span style={{fontSize:11,fontWeight:500,color:"var(--c-text2)",textTransform:"uppercase",letterSpacing:.4}}>{lbl}</span>
+              <input type={tp} value={settings[k]} min={tp==="number"?1:undefined} max={tp==="number"?120:undefined}
+                onChange={e=>setSettings(p=>({...p,[k]:tp==="number"?Math.max(1,+e.target.value):e.target.value}))}/>
+            </label>
+          ))}
+        </div>
+        <div style={{marginTop:12,padding:"8px 12px",background:"var(--c-surface2)",borderRadius:"var(--r-md)",fontSize:12,color:"var(--c-text2)"}}>
+          Pro Runde: <strong>{settings.gameDuration} Min. + {settings.slotBreak} Min. Pause</strong> · Vor Finale: {settings.preFinaleBreak} Min. · Siegerehrung: {settings.postFinaleBreak} Min.
+        </div>
+      </div>
+
+      <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:"var(--r-md)",padding:"10px 14px",marginBottom:14,fontSize:12,color:"#1e40af"}}>
+        <strong>📋 Tiebreaker:</strong> 1. Punkte → 2. Torverhältnis → 3. Tore → 4. <strong>Entscheidungsspiel</strong> (2 Teams gleich) oder <strong>Penalty Shoot-out</strong> (3+ Teams gleich, inkl. Platz 1 wenn nötig) · Shoot-out: ab mind. 3 Schüssen je Team entschieden, sobald 1 Team (bzw. 2 Teams bei Doppel-Finale) klar vorne liegt
+      </div>
+
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+        {LEVELS.map(l=>{
+          const n=(teams[l.id]||[]).filter(x=>x.trim()).length;
+          const r=gamesPerTeam[l.id]||4;
+          const warn=n>=2&&effectiveTarget(n,r)!==r;
+          return(
+            <button key={l.id} onClick={()=>setEditLvl(l.id)} style={{padding:"5px 13px",borderRadius:20,border:`2px solid ${editLvl===l.id?l.hue:l.bd}`,background:editLvl===l.id?l.hue:l.bg,color:editLvl===l.id?"#fff":l.hue,fontWeight:600,fontSize:12}}>
+              {l.label} <span style={{opacity:.7}}>({n})</span>{warn&&<span style={{marginLeft:4,fontSize:10}}>⚠️</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{background:"var(--c-surface)",borderRadius:"var(--r-xl)",border:`2px solid ${lvl.bd}`,padding:"16px 18px",marginBottom:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontWeight:600,fontSize:15,color:lvl.hue}}>{lvl.label}</div>
+          {nTeams<2&&<span style={{fontSize:11,color:"#dc2626",background:"#fee2e2",padding:"3px 10px",borderRadius:20,border:"1px solid #fca5a5"}}>Mindestens 2 Teams</span>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:lvl.bg,border:`1px solid ${lvl.bd}`,borderRadius:"var(--r-md)",marginBottom:6}}>
+          <span style={{fontSize:13,fontWeight:500,color:lvl.hue,flex:1}}>⚽ Spiele pro Team</span>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <button onClick={()=>setGamesPerTeam(p=>({...p,[editLvl]:Math.max(1,(p[editLvl]||4)-1)}))} style={{width:28,height:28,borderRadius:6,border:`1px solid ${lvl.bd}`,background:"var(--c-surface)",color:lvl.hue,fontSize:18,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+            <input type="number" min="1" max="20" value={rawGpt} onChange={e=>setGamesPerTeam(p=>({...p,[editLvl]:Math.max(1,+e.target.value)}))}
+              style={{width:52,height:32,textAlign:"center",fontSize:16,fontWeight:700,border:`2px solid ${gptWarn?"#f59e0b":lvl.hue}`,borderRadius:6,color:gptWarn?"#b45309":lvl.hue,padding:0}}/>
+            <button onClick={()=>setGamesPerTeam(p=>({...p,[editLvl]:Math.min(20,(p[editLvl]||4)+1)}))} style={{width:28,height:28,borderRadius:6,border:`1px solid ${lvl.bd}`,background:"var(--c-surface)",color:lvl.hue,fontSize:18,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+          </div>
+          <span style={{fontSize:12,color:"var(--c-text2)",minWidth:80,textAlign:"right"}}>≈ {nTeams>=2?Math.ceil(nTeams*effGpt/3):0} Runden</span>
+        </div>
+        {gptWarn&&<div style={{fontSize:12,color:"#92400e",background:"#fef9c3",border:"1px solid #fde047",borderRadius:"var(--r-md)",padding:"7px 12px",marginBottom:6}}>⚠️ Bei <strong>{nTeams} Teams</strong> werden automatisch <strong>{effGpt} Spiele</strong> verwendet (N×T muss gerade sein).</div>}
+        <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:"var(--c-surface2)",border:"1px solid var(--c-border)",borderRadius:"var(--r-md)",marginBottom:6}}>
+          <span style={{fontSize:13,fontWeight:500,flex:1}}>⏱ Spielzeit (Min.)</span>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <input type="number" min="1" max="30" value={lvlGd} onChange={e=>setGameDurOverride(p=>({...p,[editLvl]:Math.max(1,+e.target.value)}))}
+              style={{width:60,height:32,textAlign:"center",fontSize:15,padding:0,border:`2px solid ${gameDurOverride[editLvl]?"#3b82f6":"#e2e8f0"}`,color:gameDurOverride[editLvl]?"#1d4ed8":"var(--c-text)",borderRadius:6}}/>
+            {gameDurOverride[editLvl]&&<button onClick={()=>setGameDurOverride(p=>{const n={...p};delete n[editLvl];return n;})} style={{fontSize:11,color:"var(--c-text2)",background:"var(--c-surface)",border:"1px solid var(--c-border)",borderRadius:6,padding:"4px 8px"}}>↺ Standard ({settings.gameDuration} Min.)</button>}
+            {!gameDurOverride[editLvl]&&<span style={{fontSize:11,color:"var(--c-text3)"}}>= Standard</span>}
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:"var(--c-surface2)",border:"1px solid var(--c-border)",borderRadius:"var(--r-md)",marginBottom:14}}>
+          <span style={{fontSize:13,fontWeight:500,flex:1}}>🏆 Finale spielen</span>
+          {[true,false].map(val=>(
+            <button key={String(val)} onClick={()=>setWithFinale(p=>({...p,[editLvl]:val}))}
+              style={{padding:"5px 18px",borderRadius:20,fontSize:12,fontWeight:600,border:`2px solid ${(withFinale[editLvl]!==false)===val?lvl.hue:lvl.bd}`,background:(withFinale[editLvl]!==false)===val?lvl.hue:lvl.bg,color:(withFinale[editLvl]!==false)===val?"#fff":lvl.hue}}>
+              {val?"Ja":"Nein"}
+            </button>
+          ))}
+        </div>
+        {nTeams===0&&<div style={{textAlign:"center",padding:"18px 0",color:"var(--c-text3)",fontSize:13}}>Noch keine Mannschaften eingetragen</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
+          {(teams[editLvl]||[]).map((t,i)=>(
+            <div key={i} style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{width:26,height:26,borderRadius:"50%",background:lvl.hue,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:600,flexShrink:0}}>{i+1}</div>
+              <input type="text" value={t} onChange={e=>{const arr=[...teams[editLvl]];arr[i]=e.target.value;setTeams(p=>({...p,[editLvl]:arr}));}}/>
+              <button onClick={()=>setTeams(p=>({...p,[editLvl]:p[editLvl].filter((_,j)=>j!==i)}))} style={{width:28,height:28,borderRadius:"var(--r-md)",border:"1px solid #fca5a5",background:"#fff1f2",color:"#f87171",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <input type="text" value={newTeam[editLvl]||""} placeholder="Mannschaftsname…" onChange={e=>setNewTeam(p=>({...p,[editLvl]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter")addTeam();}}/>
+          <button onClick={addTeam} style={{padding:"0 16px",background:lvl.hue,color:"#fff",border:"none",borderRadius:"var(--r-md)",fontWeight:600,fontSize:13,whiteSpace:"nowrap",height:36}}>+ Hinzufügen</button>
+        </div>
+      </div>
+      <button onClick={onGenerate} style={{width:"100%",padding:"13px 0",background:"#1e3a8a",color:"#fff",border:"none",borderRadius:"var(--r-lg)",fontSize:15,fontWeight:600}}>⚽ Spielplan generieren →</button>
+    </div>
+  );
+}
+
+// ── Spielplan-Ansicht ──────────────────────────────────────────────────
+function ScheduleView({schedule,settings,scores,fScores,tbScores,penScores,tiebreakerInfo,
+                       roundDelays,scheduleOffsets,standings,collapsed,
+                       onToggle,onScore,onFScore,onTbScore,onPenScore,onRoundDelay,onRegen}){
+  const timeline=LEVELS.map(l=>({l,s:schedule[l.id]})).filter(({s})=>s);
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontSize:12,color:"var(--c-text2)"}}>{settings.gameDuration} Min. Standard · {settings.slotBreak} Min. Pause · Start {settings.startTime}</div>
+        <button onClick={onRegen} style={{padding:"6px 13px",fontSize:12,fontWeight:500,borderRadius:"var(--r-md)",border:"1px solid var(--c-border2)",background:"var(--c-surface)"}}>↺ Neu generieren</button>
+      </div>
+      <div style={{background:"var(--c-surface)",borderRadius:"var(--r-lg)",border:"1px solid var(--c-border)",padding:"12px 14px",marginBottom:16,overflowX:"auto"}}>
+        <div style={{fontSize:10,fontWeight:600,color:"var(--c-text2)",textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Zeitübersicht (inkl. Verzögerungen)</div>
+        <div style={{display:"flex",gap:6,minWidth:500}}>
+          {timeline.map(({l,s})=>{
+            const offs=scheduleOffsets[l.id]||{};
+            const effStart=(s.rounds[0]?.start||0)+(offs.rounds?.[0]||0);
+            const tbInfo=tiebreakerInfo[l.id];
+            const gd=s.gameDuration||settings.gameDuration;
+            const finaleTime=s.hasFinale?(s.finaleStart+(offs.finale||0)+(tbInfo?gd+settings.slotBreak:0)):null;
+            return(
+              <div key={l.id} style={{flex:1}}>
+                <div style={{background:l.bg,border:`1px solid ${l.bd}`,borderRadius:"var(--r-md)",padding:"6px 8px",textAlign:"center"}}>
+                  <div style={{fontSize:11,fontWeight:600,color:l.hue}}>{l.short}</div>
+                  <div style={{fontSize:12,fontWeight:500,marginTop:1}}>{toTime(effStart)}</div>
+                  <div style={{fontSize:10,color:"var(--c-text2)",marginTop:1}}>{s.hasFinale?(tbInfo?"⚔ "+toTime(s.finaleStart+(offs.finale||0))+" · 🏆 "+toTime(finaleTime):"🏆 "+toTime(finaleTime)):"kein Finale"}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {LEVELS.map(lvl=>{
+        const s=schedule[lvl.id];
+        if(!s)return(<div key={lvl.id} style={{background:"var(--c-surface)",borderRadius:"var(--r-md)",border:"1px dashed var(--c-border2)",padding:12,marginBottom:10,textAlign:"center",color:"var(--c-text2)",fontSize:12}}>{lvl.label} – keine Mannschaften</div>);
+        const st=standings[lvl.id]||[],sc=scores[lvl.id]||{},fs=fScores[lvl.id]||{};
+        const tbs=tbScores[lvl.id]||{},ps=penScores[lvl.id]||{};
+        const tbInfo=tiebreakerInfo[lvl.id],offs=scheduleOffsets[lvl.id]||{};
+        const done=s.games.filter(g=>{const r=sc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";}).length;
+        return(
+          <LevelBlock key={lvl.id} lvl={lvl} s={s} settings={settings}
+            sc={sc} fs={fs} tbs={tbs} ps={ps} st={st} done={done}
+            tbInfo={tbInfo} offs={offs} roundDelays={roundDelays[lvl.id]||[]}
+            isCollapsed={!!collapsed[lvl.id]} onToggle={()=>onToggle(lvl.id)}
+            onScore={(gid,side,val)=>onScore(lvl.id,gid,side,val)}
+            onFScore={(side,val)=>onFScore(lvl.id,side,val)}
+            onTbScore={(side,val)=>onTbScore(lvl.id,side,val)}
+            onPenScore={(team,field,val)=>onPenScore(lvl.id,team,field,val)}
+            onRoundDelay={(ri,min)=>onRoundDelay(lvl.id,ri,min)}/>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Level-Block ────────────────────────────────────────────────────────
+function LevelBlock({lvl,s,settings,sc,fs,tbs,ps,st,done,tbInfo,offs,roundDelays,
+                     isCollapsed,onToggle,onScore,onFScore,onTbScore,onPenScore,onRoundDelay}){
+  const allPrelimDone=s.games.length>0&&s.games.every(g=>{const r=sc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";});
+  const gd=s.gameDuration||settings.gameDuration;
+  const effFinaleOff=offs.finale||0;
+  const tbStart=s.finaleStart+effFinaleOff;
+  const finaleStart=s.finaleStart+effFinaleOff+(tbInfo?gd+settings.slotBreak:0);
+  const{f1,f2,tbPending}=getFinalists(allPrelimDone?st:null,allPrelimDone?tbInfo:null,tbs,ps);
+  const fOk=fs.h!=null&&fs.h!==""&&fs.a!=null&&fs.a!=="";
+  const tbOk=tbInfo?.type==="match"?(tbs.h!=null&&tbs.h!==""&&tbs.a!=null&&tbs.a!==""):tbInfo?.type==="penalty"?(()=>{const{winner,finalist}=determinePenaltyResults(tbInfo.teams,ps,tbInfo.includesFirst);return tbInfo.includesFirst?!!(winner&&finalist):!!winner;})():false;
+  const fWinner=fOk?(+fs.h>+fs.a?f1:+fs.h<+fs.a?f2:null):null;
+  const hasTbPending=allPrelimDone&&tbInfo&&!tbOk;
+
+  return(
+    <div style={{marginBottom:18,borderRadius:"var(--r-lg)",overflow:"hidden",border:`2px solid ${lvl.bd}`}}>
+      <div onClick={onToggle} style={{background:lvl.hue,padding:"12px 16px",color:"#fff",cursor:"pointer",userSelect:"none",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontWeight:600,fontSize:16}}>⚽ {lvl.label}</div>
+          <div style={{fontSize:11,opacity:.85,marginTop:2}}>
+            Start {offs.rounds?.[0]!=null?toTime(s.rounds[0]?.start+(offs.rounds[0]||0)):toTime(s.rounds[0]?.start||0)}
+            {s.hasFinale?(hasTbPending?" · ⚔ Entsch. "+toTime(tbStart)+" · 🏆 "+toTime(finaleStart):" · 🏆 Finale "+toTime(finaleStart)):" · kein Finale"}
+            {" · "}{s.games.length} Spiele · {gd} Min.
+          </div>
+        </div>
+        <div style={{display:"flex",gap:14,alignItems:"center"}}>
+          {hasTbPending&&<div style={{fontSize:10,background:"rgba(255,255,0,.3)",padding:"2px 8px",borderRadius:10,fontWeight:600}}>{tbInfo.type==="penalty"?"Penalty!":"Entsch.!"}</div>}
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:18,fontWeight:600}}>{done}<span style={{fontSize:12,opacity:.75}}>/{s.games.length}</span></div>
+            <div style={{fontSize:10,opacity:.8}}>Ergebnisse</div>
+          </div>
+          <span style={{fontSize:14,opacity:.8}}>{isCollapsed?"▼":"▲"}</span>
+        </div>
+      </div>
+
+      {!isCollapsed&&(
+        <div style={{background:"var(--c-surface)",padding:14}}>
+          {s.rounds.map((round,ri)=>{
+            const effStart=round.start+(offs.rounds?.[ri]||0);
+            const thisDelay=roundDelays[ri]||0;
+            return(
+              <div key={ri} style={{marginBottom:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                  <span style={{fontSize:11,fontWeight:500,color:"var(--c-text2)"}}>🕐 {toTime(effStart)}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:3,background:"#fef3c7",border:"1px solid #fde047",borderRadius:6,padding:"1px 6px"}}>
+                    <button onClick={()=>onRoundDelay(ri,Math.max(0,thisDelay-1))} style={{width:16,height:16,border:"none",background:"none",color:"#92400e",fontWeight:700,fontSize:13,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+                    <span style={{fontSize:10,fontWeight:600,color:thisDelay>0?"#dc2626":"#b45309",minWidth:26,textAlign:"center"}}>{thisDelay>0?`+${thisDelay}m`:"±0m"}</span>
+                    <button onClick={()=>onRoundDelay(ri,thisDelay+1)} style={{width:16,height:16,border:"none",background:"none",color:"#92400e",fontWeight:700,fontSize:13,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+                    <span style={{fontSize:9,color:"#92400e",marginLeft:1}}>Verzög.</span>
+                  </div>
+                  <div style={{flex:1,height:1,background:"var(--c-border)"}}/>
+                  <span style={{fontSize:11,color:"var(--c-text2)"}}>Runde {ri+1}</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                  {[0,1,2].map(fi=>{
+                    const g=round.games[fi];
+                    if(!g)return(<div key={fi} style={{background:"var(--c-surface2)",borderRadius:"var(--r-md)",padding:10,border:"1px dashed var(--c-border2)",display:"flex",alignItems:"center",justifyContent:"center",minHeight:90}}><span style={{fontSize:11,color:"var(--c-text3)"}}>Feld {fi+1} frei</span></div>);
+                    const r=sc[g.id]||{};
+                    const ok=r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";
+                    const win=ok?(+r.h>+r.a?g.home:+r.h<+r.a?g.away:null):null;
+                    return(
+                      <div key={fi} style={{background:ok?lvl.bg:"var(--c-surface)",borderRadius:"var(--r-md)",padding:10,border:`1px solid ${ok?lvl.bd:"var(--c-border)"}`}}>
+                        <div style={{fontSize:10,fontWeight:500,color:"var(--c-text2)",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Feld {fi+1}</div>
+                        <div style={{marginBottom:8,lineHeight:1.4}}>
+                          <div style={{fontSize:12,fontWeight:win===g.home?600:400,color:win===g.home?lvl.hue:"var(--c-text)"}}>{win===g.home?"🏆 ":""}{g.home}</div>
+                          <div style={{fontSize:10,color:"var(--c-text2)",margin:"2px 0"}}>vs</div>
+                          <div style={{fontSize:12,fontWeight:win===g.away?600:400,color:win===g.away?lvl.hue:"var(--c-text)"}}>{win===g.away?"🏆 ":""}{g.away}</div>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:5}}>
+                          <input type="number" min="0" max="99" value={r.h??""} onChange={e=>onScore(g.id,"h",e.target.value)} style={{width:38,padding:"3px 4px",border:`2px solid ${ok&&+r.h>+r.a?lvl.hue:"#e5e7eb"}`,borderRadius:6,textAlign:"center",fontSize:15,fontWeight:500}}/>
+                          <span style={{color:"var(--c-text2)",fontWeight:500}}>:</span>
+                          <input type="number" min="0" max="99" value={r.a??""} onChange={e=>onScore(g.id,"a",e.target.value)} style={{width:38,padding:"3px 4px",border:`2px solid ${ok&&+r.a>+r.h?lvl.hue:"#e5e7eb"}`,borderRadius:6,textAlign:"center",fontSize:15,fontWeight:500}}/>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+
+          {s.hasFinale&&(
+            <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 0 12px",padding:"7px 12px",background:"#fef9c3",border:"1px solid #fde047",borderRadius:"var(--r-md)"}}>
+              <span>⏸</span>
+              <span style={{fontSize:12,color:"#92400e",fontWeight:500}}>{settings.preFinaleBreak} Min. Pause · Tabelle wird ausgewertet</span>
+            </div>
+          )}
+
+          {/* Tabelle */}
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:10,fontWeight:600,color:"var(--c-text2)",textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Tabelle Vorrunde</div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:400}}>
+                <thead>
+                  <tr style={{background:"var(--c-surface2)"}}>
+                    {["","Mannschaft","Sp.","S","U","N","Tore","±","Pkt."].map((h,i)=>(
+                      <th key={i} style={{padding:"5px 6px",textAlign:i===1?"left":"center",color:"var(--c-text2)",fontWeight:500,fontSize:11,borderBottom:"1px solid var(--c-border)"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {st.map((row,i)=>{
+                    const showTopMedal=!s.hasFinale||fOk;
+                    const medal=i===0?(showTopMedal?"🥇":"1"):i===1?(showTopMedal?"🥈":"2"):i+1;
+                    return(
+                      <tr key={row.name} style={{background:i<2?lvl.bg:"transparent",borderBottom:"1px solid var(--c-border)"}}>
+                        <td style={{padding:"5px 6px",textAlign:"center",fontSize:i<2?13:12}}>{medal}</td>
+                        <td style={{padding:"5px 6px",fontWeight:i<2?600:400}}>{row.name}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center"}}>{row.p}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center"}}>{row.w}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center"}}>{row.d}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center"}}>{row.l}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center"}}>{row.gf}:{row.ga}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center",color:row.gd>0?"#16a34a":row.gd<0?"#dc2626":"var(--c-text2)",fontWeight:row.gd!==0?600:400}}>{row.gd>0?"+":""}{row.gd}</td>
+                        <td style={{padding:"5px 6px",textAlign:"center",fontWeight:600,color:lvl.hue}}>{row.pts}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ── Entscheidungsspiel (2 Teams) ── */}
+          {s.hasFinale&&allPrelimDone&&tbInfo&&tbInfo.type==="match"&&(
+            <div style={{background:"#fff7ed",border:"2px solid #fb923c",borderRadius:"var(--r-lg)",padding:14,marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:13,fontWeight:600,color:"#9a3412"}}>⚔️ Entscheidungsspiel · {toTime(tbStart)}</span>
+                <span style={{fontSize:11,color:"#9a3412",opacity:.8}}>{gd} Min. · Sieger ins Finale</span>
+              </div>
+              <div style={{fontSize:11,color:"#9a3412",marginBottom:10,background:"#ffedd5",padding:"6px 10px",borderRadius:6,lineHeight:1.5}}>
+                Vollständiger Gleichstand (Pkt./Tordiff./Tore) zwischen <strong>{tbInfo.teams[0]}</strong> und <strong>{tbInfo.teams[1]}</strong>. Der Sieger trifft im Finale auf <strong>{allPrelimDone?st[0]?.name:"Platz 1"}</strong>.
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{flex:1,textAlign:"center",padding:"8px 6px",background:"rgba(255,255,255,.8)",borderRadius:"var(--r-md)",border:"1px solid #fed7aa"}}>
+                  <div style={{fontWeight:600,fontSize:13}}>{tbInfo.teams[0]}</div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <input type="number" min="0" max="99" value={tbs.h??""} onChange={e=>onTbScore("h",e.target.value)} style={{width:48,padding:"5px 2px",border:"2px solid #fb923c",borderRadius:8,textAlign:"center",fontSize:20,fontWeight:500}}/>
+                    <span style={{fontWeight:600,color:"#9a3412",fontSize:22}}>:</span>
+                    <input type="number" min="0" max="99" value={tbs.a??""} onChange={e=>onTbScore("a",e.target.value)} style={{width:48,padding:"5px 2px",border:"2px solid #fb923c",borderRadius:8,textAlign:"center",fontSize:20,fontWeight:500}}/>
+                  </div>
+                  {tbs.h!=null&&tbs.h!==""&&tbs.a!=null&&tbs.a!==""&&(
+                    <div style={{fontSize:11,fontWeight:600,color:"#9a3412"}}>
+                      {+tbs.h>+tbs.a?`✓ ${tbInfo.teams[0]} ins Finale`:+tbs.h<+tbs.a?`✓ ${tbInfo.teams[1]} ins Finale`:"Unentschieden – weiterspielen!"}
+                    </div>
+                  )}
+                </div>
+                <div style={{flex:1,textAlign:"center",padding:"8px 6px",background:"rgba(255,255,255,.8)",borderRadius:"var(--r-md)",border:"1px solid #fed7aa"}}>
+                  <div style={{fontWeight:600,fontSize:13}}>{tbInfo.teams[1]}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Penalty Shoot-out (3+ Teams) ── */}
+          {s.hasFinale&&allPrelimDone&&tbInfo&&tbInfo.type==="penalty"&&(()=>{
+            const{winner:penWin,finalist:penFin}=determinePenaltyResults(tbInfo.teams,ps);
+            const allShot3=tbInfo.teams.every(t=>(ps[t]?.shots||0)>=3);
+            const shots0=ps[tbInfo.teams[0]]?.shots||0;
+            const ranked=[...tbInfo.teams].sort((a,b)=>(ps[b]?.goals||0)-(ps[a]?.goals||0));
+            return(
+              <div style={{background:"#fff7ed",border:"2px solid #fb923c",borderRadius:"var(--r-lg)",padding:14,marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <span style={{fontSize:13,fontWeight:600,color:"#9a3412"}}>🎯 Penalty Shoot-out · {toTime(tbStart)}</span>
+                  <span style={{fontSize:11,color:"#9a3412",opacity:.8}}>{tbInfo.teams.length} Teams · mind. 3 Schüsse</span>
+                </div>
+                <div style={{fontSize:11,color:"#9a3412",marginBottom:8,background:"#ffedd5",padding:"6px 10px",borderRadius:6,lineHeight:1.5}}>
+                  {tbInfo.teams.length}-facher Vollgleichstand (Pkt./Tordiff./Tore)
+                  {tbInfo.includesFirst?" – inkl. Platz 1. Shoot-out bestimmt beide Finalisten (1. + 2. des Shoot-outs).":" – Shoot-out bestimmt den 2. Finalisten."}
+                  {" "}Jede Mannschaft schießt mind. 3 Penalties, bei Gleichstand Runde für Runde weiter.
+                </div>
+                {tbInfo.includesFirst&&(
+                  <div style={{marginBottom:8,padding:"6px 10px",background:"#fef3c7",border:"1px solid #fde047",borderRadius:6,fontSize:11,color:"#92400e"}}>
+                    <strong>Platz 1 ist dabei:</strong> Sieger = Finalist 1 · Zweiter = Finalist 2 · Diese beiden spielen das Finale.
+                  </div>
+                )}
+                {!tbInfo.includesFirst&&(
+                  <div style={{marginBottom:8,padding:"6px 10px",background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:6,fontSize:11,color:"#15803d"}}>
+                    <strong>{st[0]?.name}</strong> steht bereits als Finalist 1 fest und wartet auf den Shoot-out-Sieger.
+                  </div>
+                )}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:8}}>
+                  {ranked.map(team=>{
+                    const d=ps[team]||{goals:0,shots:0};
+                    const isWin=penWin===team;
+                    const isFin=tbInfo.includesFirst?(penWin===team||penFin===team):penWin===team;
+                    const isElim=allShot3&&penWin&&!isFin;
+                    const badge=isWin?"🥇":tbInfo.includesFirst&&penFin===team?"🥈":"";
+                    return(
+                      <div key={team} style={{background:isWin?"#dcfce7":isFin&&tbInfo.includesFirst?"#eff6ff":isElim?"rgba(255,255,255,.35)":"rgba(255,255,255,.85)",border:`2px solid ${isWin?"#16a34a":isFin&&tbInfo.includesFirst?"#93c5fd":isElim?"#e5e7eb":"#fed7aa"}`,borderRadius:"var(--r-md)",padding:"10px 8px",textAlign:"center",opacity:isElim?.4:1}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:3,color:isWin?"#15803d":isFin&&tbInfo.includesFirst?"#1d4ed8":"#9a3412"}}>
+                          {badge&&<span style={{marginRight:3}}>{badge}</span>}{team}
+                        </div>
+                        {allShot3&&<div style={{fontSize:9,fontWeight:600,marginBottom:4,color:isWin?"#15803d":isFin&&tbInfo.includesFirst?"#1d4ed8":"#9a3412"}}>
+                          {isWin?"→ Finalist 1":tbInfo.includesFirst&&penFin===team?"→ Finalist 2":isElim?"ausgeschieden":""}
+                        </div>}
+                        <div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:4}}>
+                          <div>
+                            <div style={{fontSize:9,color:"#9a3412",marginBottom:2,textTransform:"uppercase"}}>Schüsse</div>
+                            <div style={{display:"flex",alignItems:"center",gap:2}}>
+                              <button onClick={()=>onPenScore(team,"shots",Math.max(0,d.shots-1))} style={{width:20,height:20,border:"1px solid #fed7aa",background:"#fff",borderRadius:4,fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",color:"#9a3412",padding:0}}>−</button>
+                              <span style={{fontSize:16,fontWeight:700,color:"#9a3412",minWidth:22,textAlign:"center"}}>{d.shots}</span>
+                              <button onClick={()=>onPenScore(team,"shots",d.shots+1)} style={{width:20,height:20,border:"1px solid #fed7aa",background:"#fff",borderRadius:4,fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",color:"#9a3412",padding:0}}>+</button>
+                            </div>
+                          </div>
+                          <div style={{width:1,background:"#fed7aa"}}/>
+                          <div>
+                            <div style={{fontSize:9,color:"#9a3412",marginBottom:2,textTransform:"uppercase"}}>Treffer</div>
+                            <div style={{display:"flex",alignItems:"center",gap:2}}>
+                              <button onClick={()=>onPenScore(team,"goals",Math.max(0,d.goals-1))} style={{width:20,height:20,border:"1px solid #fed7aa",background:"#fff",borderRadius:4,fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",color:"#9a3412",padding:0}}>−</button>
+                              <span style={{fontSize:16,fontWeight:700,color:"#15803d",minWidth:22,textAlign:"center"}}>{d.goals}</span>
+                              <button onClick={()=>onPenScore(team,"goals",Math.min(d.shots,d.goals+1))} style={{width:20,height:20,border:"1px solid #fed7aa",background:"#fff",borderRadius:4,fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",color:"#9a3412",padding:0}}>+</button>
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{fontSize:10,color:"#9a3412"}}>{d.goals}/{d.shots||0} {d.shots>=3?"✓":d.shots>0?`(${3-d.shots} fehlen)`:""}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {tbInfo.includesFirst&&penWin&&penFin&&(
+                  <div style={{padding:"8px 12px",background:"#dcfce7",border:"1px solid #86efac",borderRadius:6,fontSize:12,fontWeight:600,color:"#15803d",textAlign:"center"}}>
+                    ✓ Finale steht fest: 🥇 {penWin} vs 🥈 {penFin}
+                  </div>
+                )}
+                {!tbInfo.includesFirst&&penWin&&(
+                  <div style={{padding:"8px 12px",background:"#dcfce7",border:"1px solid #86efac",borderRadius:6,fontSize:12,fontWeight:600,color:"#15803d",textAlign:"center"}}>
+                    ✓ {penWin} ins Finale! Gegner: {st[0]?.name}
+                  </div>
+                )}
+                {tbInfo.includesFirst&&penWin&&!penFin&&allShot3&&(
+                  <div style={{padding:"8px 12px",background:"#fef9c3",border:"1px solid #fde047",borderRadius:6,fontSize:12,color:"#92400e",textAlign:"center"}}>
+                    Finalist 1: ✓ {penWin} · Gleichstand um Finalist 2 – nächste Runde!
+                  </div>
+                )}
+                {allShot3&&!penWin&&(
+                  <div style={{padding:"8px 12px",background:"#fef9c3",border:"1px solid #fde047",borderRadius:6,fontSize:12,color:"#92400e",textAlign:"center"}}>
+                    Gleichstand nach {shots0} Schüssen – nächste Runde weiterschießen!
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ── Finale ── */}
+          {s.hasFinale&&(
+            <div style={{background:"#fffbeb",border:"2px solid #fcd34d",borderRadius:"var(--r-lg)",padding:14,marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <span style={{fontSize:13,fontWeight:600,color:"#92400e"}}>🏆 Finale · {toTime(finaleStart)}</span>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  {!allPrelimDone&&<span style={{fontSize:11,color:"#92400e",background:"#fef3c7",padding:"2px 8px",borderRadius:10,border:"1px solid #fde047"}}>⏳ Vorrunde läuft</span>}
+                  {hasTbPending&&<span style={{fontSize:11,color:"#9a3412",background:"#ffedd5",padding:"2px 8px",borderRadius:10,border:"1px solid #fed7aa"}}>⚔️ Entsch. ausstehend</span>}
+                  <span style={{fontSize:11,color:"#92400e",opacity:.8}}>{gd} Min.</span>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{flex:1,textAlign:"center",padding:"10px 6px",background:"rgba(255,255,255,.6)",borderRadius:"var(--r-md)",border:"1px solid #fde047"}}>
+                  {fOk&&fWinner===f1&&<div style={{fontSize:18,marginBottom:2}}>🥇</div>}
+                  {fOk&&fWinner!==f1&&fWinner!==null&&<div style={{fontSize:16,marginBottom:2}}>🥈</div>}
+                  <div style={{fontWeight:600,fontSize:14,color:f1==="?"?"var(--c-text2)":"#1e293b"}}>{f1}</div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <input type="number" min="0" max="99" value={fs.h??""} onChange={e=>onFScore("h",e.target.value)}
+                      disabled={!allPrelimDone||hasTbPending}
+                      style={{width:48,padding:"5px 2px",border:"2px solid #fcd34d",borderRadius:8,textAlign:"center",fontSize:20,fontWeight:500,opacity:(!allPrelimDone||hasTbPending)?.4:1}}/>
+                    <span style={{fontWeight:600,color:"#92400e",fontSize:22}}>:</span>
+                    <input type="number" min="0" max="99" value={fs.a??""} onChange={e=>onFScore("a",e.target.value)}
+                      disabled={!allPrelimDone||hasTbPending}
+                      style={{width:48,padding:"5px 2px",border:"2px solid #fcd34d",borderRadius:8,textAlign:"center",fontSize:20,fontWeight:500,opacity:(!allPrelimDone||hasTbPending)?.4:1}}/>
+                  </div>
+                  {fOk&&<div style={{fontSize:11,fontWeight:600,color:"#92400e"}}>{fWinner?"🏆 Sieger: "+fWinner:"Unentschieden!"}</div>}
+                </div>
+                <div style={{flex:1,textAlign:"center",padding:"10px 6px",background:"rgba(255,255,255,.6)",borderRadius:"var(--r-md)",border:"1px solid #fde047"}}>
+                  {fOk&&fWinner===f2&&<div style={{fontSize:18,marginBottom:2}}>🥇</div>}
+                  {fOk&&fWinner!==f2&&fWinner!==null&&<div style={{fontSize:16,marginBottom:2}}>🥈</div>}
+                  <div style={{fontWeight:600,fontSize:14,color:f2==="?"?"var(--c-text2)":"#1e293b"}}>{f2}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!s.hasFinale&&st[0]&&(
+            <div style={{background:"#fffbeb",border:"2px solid #fcd34d",borderRadius:"var(--r-lg)",padding:14,marginBottom:8}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#92400e",marginBottom:10,textTransform:"uppercase"}}>🏆 Sieger (kein Finale)</div>
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1,textAlign:"center",padding:"12px 8px",background:"rgba(255,255,255,.7)",borderRadius:"var(--r-md)",border:"1px solid #fde047"}}>
+                  <div style={{fontSize:22,marginBottom:4}}>🥇</div>
+                  <div style={{fontWeight:700,fontSize:16}}>{st[0].name}</div>
+                  <div style={{fontSize:11,color:"#92400e",marginTop:3}}>{st[0].pts} Pkt.</div>
+                </div>
+                {st[1]&&<div style={{flex:1,textAlign:"center",padding:"10px 8px",background:"rgba(255,255,255,.5)",borderRadius:"var(--r-md)"}}>
+                  <div style={{fontSize:18,marginBottom:3}}>🥈</div>
+                  <div style={{fontWeight:600,fontSize:14}}>{st[1].name}</div>
+                  <div style={{fontSize:11,color:"var(--c-text2)",marginTop:2}}>{st[1].pts} Pkt.</div>
+                </div>}
+              </div>
+            </div>
+          )}
+
+          <div style={{textAlign:"center",padding:"7px 12px",background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:"var(--r-md)",fontSize:12,color:"#15803d",fontWeight:500}}>
+            🏅 Siegerehrung · {settings.postFinaleBreak} Min. bis zur nächsten Klassenstufe
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Zuschauer-Ansicht ─────────────────────────────────────────────────
+function ViewerMode({schedule,scores,fScores,standings,settings,tbScores,penScores,tiebreakerInfo,scheduleOffsets,onExit,standalone}){
+  const[selLvl,setSelLvl]=useState(null);
+  const[viewTab,setViewTab]=useState("table");
+  useEffect(()=>{const t=setInterval(()=>{},30000);return()=>clearInterval(t);},[]);
+
+  const activeLevels=LEVELS.filter(l=>schedule&&schedule[l.id]);
+  const curLvl=selLvl||activeLevels[0]?.id;
+  const lvlMeta=LEVELS.find(l=>l.id===curLvl);
+
+  if(!schedule||!activeLevels.length)return(
+    <div className="viewer-mode" style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+      <div style={{fontSize:48}}>📋</div>
+      <div style={{fontSize:18,fontWeight:600,color:"rgba(255,255,255,.9)"}}>Kein Spielplan vorhanden</div>
+      {!standalone&&<button onClick={onExit} style={{padding:"9px 22px",background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",color:"#fff",borderRadius:20,fontSize:13,fontWeight:500}}>← Zurück</button>}
+    </div>
+  );
+
+  const s=schedule[curLvl],sc=scores[curLvl]||{},fs=fScores[curLvl]||{};
+  const tbs=tbScores?.[curLvl]||{},ps=penScores?.[curLvl]||{};
+  const st=standings[curLvl]||[],tbInfo=tiebreakerInfo?.[curLvl];
+  const offs=scheduleOffsets?.[curLvl]||{};
+  const gd=s?.gameDuration||settings.gameDuration;
+  const finaleStart=s?.finaleStart+(offs.finale||0)+(tbInfo?gd+settings.slotBreak:0);
+  const allPrelimDone=s&&s.games.length>0&&s.games.every(g=>{const r=sc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";});
+  const fOk=fs.h!=null&&fs.h!==""&&fs.a!=null&&fs.a!=="";
+  const tbOk=tbInfo?.type==="match"?(tbs.h!=null&&tbs.h!==""&&tbs.a!=null&&tbs.a!==""):tbInfo?.type==="penalty"?(()=>{const{winner,finalist}=determinePenaltyResults(tbInfo.teams,ps,tbInfo.includesFirst);return tbInfo.includesFirst?!!(winner&&finalist):!!winner;})():false;
+  const{f1,f2,tbPending}=getFinalists(allPrelimDone?st:null,allPrelimDone?tbInfo:null,tbs,ps);
+  const fWinner=fOk?(+fs.h>+fs.a?f1:+fs.h<+fs.a?f2:null):null;
+  const doneGames=s?s.games.filter(g=>{const r=sc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";}).length:0;
+  const totalGames=s?.games.length||0;
+
+  return(
+    <div className="viewer-mode">
+      <div style={{padding:"14px 18px",borderBottom:"1px solid rgba(255,255,255,.1)",display:"flex",alignItems:"center",justifyContent:"space-between",background:"rgba(0,0,0,.2)",backdropFilter:"blur(10px)",position:"sticky",top:0,zIndex:100}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:24}}>⚽</span>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>Schulturnier 2026</div>
+            <div style={{fontSize:11,color:"rgba(255,255,255,.55)",marginTop:1}}>27. Juni 2026 · Live-Ergebnisse</div>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div className="viewer-badge"><div className="live-dot"/> LIVE</div>
+          {!standalone&&<button onClick={onExit} style={{padding:"6px 12px",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.2)",color:"rgba(255,255,255,.8)",borderRadius:16,fontSize:11,fontWeight:500}}>← Verwaltung</button>}
+        </div>
+      </div>
+
+      <div style={{maxWidth:700,margin:"0 auto",padding:"16px 14px"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+          {activeLevels.map(l=>{
+            const lvl=LEVELS.find(x=>x.id===l.id),isSel=curLvl===l.id;
+            const lSc=scores[l.id]||{},lS=schedule[l.id];
+            const lDone=lS?lS.games.filter(g=>{const r=lSc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";}).length:0;
+            const lTotal=lS?.games.length||0;
+            const lFsc=fScores[l.id]||{};
+            const lFinDone=lFsc.h!=null&&lFsc.h!==""&&lFsc.a!=null&&lFsc.a!=="";
+            return(
+              <button key={l.id} onClick={()=>{setSelLvl(l.id);setViewTab("table");}}
+                style={{padding:"7px 14px",borderRadius:20,fontSize:12,fontWeight:600,border:`2px solid ${isSel?"rgba(255,255,255,.8)":lvl.bd}`,background:isSel?lvl.hue:"rgba(255,255,255,.07)",color:isSel?"#fff":lvl.hue}}>
+                {lvl.short}<span style={{display:"inline-block",marginLeft:5,fontSize:10,opacity:.7}}>{lFinDone?"🏆":lDone===lTotal&&lTotal>0?"✓":`${lDone}/${lTotal}`}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {lvlMeta&&s&&(
+          <div className="viewer-card" style={{marginBottom:14,overflow:"hidden"}}>
+            <div style={{background:lvlMeta.hue,padding:"10px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontWeight:700,fontSize:15,color:"#fff"}}>⚽ {lvlMeta.label}</div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <span style={{fontSize:11,color:"rgba(255,255,255,.8)"}}>{doneGames}/{totalGames}</span>
+                {allPrelimDone&&tbInfo&&!tbOk&&<span style={{fontSize:11,background:"rgba(251,146,60,.4)",padding:"2px 8px",borderRadius:10,color:"#fff",fontWeight:500}}>{tbInfo.type==="penalty"?"🎯 Penalty":"⚔️ Entsch.spiel"}</span>}
+                {fOk&&<span style={{fontSize:11,background:"rgba(255,255,255,.2)",padding:"2px 8px",borderRadius:10,color:"#fff",fontWeight:500}}>🏆 Finale gespielt</span>}
+              </div>
+            </div>
+            <div style={{display:"flex",borderBottom:"1px solid rgba(255,255,255,.1)"}}>
+              {[["table","📊 Tabelle"],["games","⚽ Spiele"],["winner","🏆 Sieger"]].map(([id,lbl])=>(
+                <button key={id} onClick={()=>setViewTab(id)} style={{padding:"9px 16px",border:"none",background:"none",fontSize:12,fontWeight:viewTab===id?600:400,color:viewTab===id?"#fff":"rgba(255,255,255,.5)",borderBottom:viewTab===id?`2px solid ${lvlMeta.hue}`:"2px solid transparent",marginBottom:-1}}>{lbl}</button>
+              ))}
+            </div>
+            <div style={{padding:14}}>
+
+              {viewTab==="table"&&(
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                    <thead>
+                      <tr>{["","Mannschaft","Sp.","S","U","N","Tore","±","Pkt."].map((h,i)=>(
+                        <th key={i} style={{padding:"6px 8px",textAlign:i===1?"left":"center",color:"rgba(255,255,255,.5)",fontWeight:500,fontSize:11,borderBottom:"1px solid rgba(255,255,255,.1)"}}>{h}</th>
+                      ))}</tr>
+                    </thead>
+                    <tbody>
+                      {st.map((row,i)=>{
+                        const showMedal=!s.hasFinale||fOk;
+                        const medal=i===0?(showMedal?"🥇":"1"):i===1?(showMedal?"🥈":"2"):i+1;
+                        return(
+                          <tr key={row.name} style={{background:i===0?"rgba(255,255,255,.1)":i===1?"rgba(255,255,255,.06)":"transparent",borderBottom:"1px solid rgba(255,255,255,.06)"}}>
+                            <td style={{padding:"7px 8px",textAlign:"center",fontSize:14}}>{medal}</td>
+                            <td style={{padding:"7px 8px",fontWeight:i<2?700:400,color:"#fff"}}>{row.name}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:"rgba(255,255,255,.7)"}}>{row.p}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:"rgba(255,255,255,.7)"}}>{row.w}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:"rgba(255,255,255,.7)"}}>{row.d}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:"rgba(255,255,255,.7)"}}>{row.l}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:"rgba(255,255,255,.7)"}}>{row.gf}:{row.ga}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",color:row.gd>0?"#4ade80":row.gd<0?"#f87171":"rgba(255,255,255,.4)",fontWeight:row.gd!==0?600:400}}>{row.gd>0?"+":""}{row.gd}</td>
+                            <td style={{padding:"7px 8px",textAlign:"center",fontWeight:700,color:lvlMeta.hue,fontSize:14}}>{row.pts}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {allPrelimDone&&tbInfo&&!tbOk&&(
+                    <div style={{marginTop:10,padding:"8px 12px",background:"rgba(251,146,60,.2)",border:"1px solid rgba(251,146,60,.4)",borderRadius:8,fontSize:12,color:"#fed7aa"}}>
+                      {tbInfo.type==="penalty"
+                        ?<span>🎯 <strong>Penalty Shoot-out</strong> zwischen {tbInfo.teams.join(", ")} – Sieger ins Finale</span>
+                        :<span>⚔️ <strong>Entscheidungsspiel</strong> zwischen <strong>{tbInfo.teams[0]}</strong> und <strong>{tbInfo.teams[1]}</strong> – Sieger ins Finale</span>}
+                    </div>
+                  )}
+                  {allPrelimDone&&tbInfo&&tbOk&&!fOk&&(
+                    <div style={{marginTop:10,padding:"8px 12px",background:"rgba(34,197,94,.2)",border:"1px solid rgba(34,197,94,.4)",borderRadius:8,fontSize:12,color:"#86efac"}}>
+                      ✓ {f2} ins Finale · Finale gegen {f1} um {toTime(finaleStart)}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {viewTab==="games"&&(
+                <div>
+                  {s.rounds.map((round,ri)=>{
+                    const effStart=round.start+(offs.rounds?.[ri]||0);
+                    return(
+                      <div key={ri} style={{marginBottom:14}}>
+                        <div style={{fontSize:11,fontWeight:500,color:"rgba(255,255,255,.5)",marginBottom:7,display:"flex",alignItems:"center",gap:8}}>
+                          <span>🕐 {toTime(effStart)}</span><div style={{flex:1,height:1,background:"rgba(255,255,255,.1)"}}/>
+                          <span>Runde {ri+1}</span>
+                        </div>
+                        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                          {round.games.map((g,fi)=>{
+                            const r=sc[g.id]||{},ok=r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";
+                            const win=ok?(+r.h>+r.a?g.home:+r.h<+r.a?g.away:null):null;
+                            return(
+                              <div key={g.id} style={{background:ok?"rgba(255,255,255,.1)":"rgba(255,255,255,.04)",borderRadius:8,padding:"10px 14px",border:`1px solid ${ok?"rgba(255,255,255,.2)":"rgba(255,255,255,.08)"}`,display:"flex",alignItems:"center",gap:12}}>
+                                <span style={{fontSize:10,color:"rgba(255,255,255,.4)",minWidth:36}}>Feld {fi+1}</span>
+                                <div style={{flex:1,display:"flex",alignItems:"center",gap:8,justifyContent:"space-between"}}>
+                                  <span style={{fontWeight:win===g.home?700:400,color:win===g.home?"#fff":"rgba(255,255,255,.7)",fontSize:13}}>{g.home}</span>
+                                  {ok?<span style={{fontSize:18,fontWeight:700,color:"#fff",letterSpacing:2,fontFamily:"'DM Mono',monospace"}}>{r.h} : {r.a}</span>:<span style={{fontSize:13,color:"rgba(255,255,255,.3)"}}>vs</span>}
+                                  <span style={{fontWeight:win===g.away?700:400,color:win===g.away?"#fff":"rgba(255,255,255,.7)",fontSize:13,textAlign:"right"}}>{g.away}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {s.hasFinale&&allPrelimDone&&tbInfo&&(
+                    <div style={{marginTop:8,background:"rgba(251,146,60,.12)",border:"1px solid rgba(251,146,60,.35)",borderRadius:10,padding:14}}>
+                      <div style={{fontSize:12,fontWeight:600,color:"#fb923c",marginBottom:8}}>{tbInfo.type==="penalty"?"🎯 Penalty Shoot-out":"⚔️ Entscheidungsspiel"} · {toTime(s.finaleStart+(offs.finale||0))}</div>
+                      {tbInfo.type==="match"&&(
+                        <div style={{display:"flex",alignItems:"center",gap:12,justifyContent:"space-between"}}>
+                          <span style={{fontWeight:600,color:"#fff",fontSize:13}}>{tbInfo.teams[0]}</span>
+                          {tbOk?<span style={{fontSize:18,fontWeight:700,color:"#fb923c",fontFamily:"'DM Mono',monospace"}}>{tbs.h} : {tbs.a}</span>:<span style={{fontSize:13,color:"rgba(255,255,255,.3)"}}>vs</span>}
+                          <span style={{fontWeight:600,color:"#fff",fontSize:13}}>{tbInfo.teams[1]}</span>
+                        </div>
+                      )}
+                      {tbInfo.type==="penalty"&&(()=>{
+                        const{winner:pvW,finalist:pvF}=determinePenaltyResults(tbInfo.teams,ps,tbInfo.includesFirst);
+                        const ranked=[...tbInfo.teams].sort((a,b)=>(ps[b]?.goals||0)-(ps[a]?.goals||0));
+                        return(
+                          <div>
+                            {tbInfo.includesFirst&&<div style={{fontSize:10,color:"#fb923c",marginBottom:6}}>Platz 1 im Shoot-out – bestimmt beide Finalisten</div>}
+                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                              {ranked.map(team=>{
+                                const d=ps[team]||{goals:0,shots:0};
+                                const isW=pvW===team,isF=tbInfo.includesFirst&&pvF===team;
+                                const badge=isW?"🥇 ":isF?"🥈 ":"";
+                                return(
+                                  <div key={team} style={{background:isW?"rgba(34,197,94,.2)":isF?"rgba(59,130,246,.2)":"rgba(255,255,255,.1)",border:`1px solid ${isW?"rgba(34,197,94,.4)":isF?"rgba(59,130,246,.4)":"rgba(255,255,255,.15)"}`,borderRadius:6,padding:"6px 10px",textAlign:"center",opacity:pvW&&!isW&&!isF?.4:1}}>
+                                    <div style={{fontSize:12,fontWeight:600,color:"#fff"}}>{badge}{team}</div>
+                                    {d.shots>0&&<div style={{fontSize:11,color:"#fb923c",marginTop:2}}>{d.goals}/{d.shots} Treffer</div>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {tbInfo.includesFirst&&pvW&&pvF&&<div style={{marginTop:6,fontSize:11,color:"#4ade80",fontWeight:600}}>✓ Finale: {pvW} vs {pvF}</div>}
+                            {!tbInfo.includesFirst&&pvW&&<div style={{marginTop:6,fontSize:11,color:"#4ade80",fontWeight:600}}>✓ {pvW} ins Finale</div>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  {s.hasFinale&&(
+                    <div style={{marginTop:8,background:"rgba(252,211,77,.1)",border:"1px solid rgba(252,211,77,.3)",borderRadius:10,padding:14}}>
+                      <div style={{fontSize:12,fontWeight:600,color:"#fcd34d",marginBottom:10}}>🏆 Finale · {toTime(finaleStart)}</div>
+                      <div style={{display:"flex",alignItems:"center",gap:12,justifyContent:"space-between"}}>
+                        <span style={{fontWeight:fWinner===f1?700:400,color:"#fff",fontSize:14}}>{allPrelimDone?(tbPending?"Sieger Entsch.":f1):"Platz 1"}</span>
+                        {fOk?<span style={{fontSize:24,fontWeight:700,color:"#fcd34d",fontFamily:"'DM Mono',monospace"}}>{fs.h} : {fs.a}</span>:<span style={{fontSize:13,color:"rgba(255,255,255,.3)"}}>{allPrelimDone?"Noch nicht gespielt":"Vorrunde läuft"}</span>}
+                        <span style={{fontWeight:fWinner===f2?700:400,color:"#fff",fontSize:14,textAlign:"right"}}>{allPrelimDone?(tbPending?"Sieger Entsch.":f2):"Platz 2"}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {viewTab==="winner"&&(
+                <div style={{textAlign:"center",padding:"8px 0"}}>
+                  {fWinner?(
+                    <>
+                      <div style={{fontSize:64,marginBottom:8}}>🏆</div>
+                      <div style={{fontSize:13,color:"rgba(255,255,255,.5)",marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>Turniersieger {lvlMeta.label}</div>
+                      <div className="viewer-winner" style={{fontSize:36,fontWeight:800,letterSpacing:-1,marginBottom:16}}>{fWinner}</div>
+                      <div style={{display:"flex",gap:12,justifyContent:"center"}}>
+                        {[{name:f1,medal:"🥇"},{name:f2,medal:"🥈"}].map(({name,medal})=>(
+                          <div key={name} style={{background:"rgba(255,255,255,.08)",border:"1px solid rgba(255,255,255,.15)",borderRadius:10,padding:"10px 16px",minWidth:90}}>
+                            <div style={{fontSize:22,marginBottom:4}}>{medal}</div>
+                            <div style={{fontWeight:700,color:"#fff",fontSize:13}}>{name}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ):allPrelimDone&&tbPending?(
+                    <>
+                      <div style={{fontSize:48,marginBottom:8}}>{tbInfo?.type==="penalty"?"🎯":"⚔️"}</div>
+                      <div style={{fontSize:15,fontWeight:600,color:"rgba(255,255,255,.8)",marginBottom:6}}>{tbInfo?.type==="penalty"?"Penalty Shoot-out läuft":"Entscheidungsspiel läuft"}</div>
+                      <div style={{fontSize:13,color:"rgba(255,255,255,.4)"}}>{f1} steht fest · Gegner wird ermittelt</div>
+                    </>
+                  ):allPrelimDone&&!fOk&&s.hasFinale?(
+                    <>
+                      <div style={{fontSize:48,marginBottom:8}}>⏳</div>
+                      <div style={{fontSize:15,fontWeight:600,color:"rgba(255,255,255,.8)",marginBottom:6}}>Finale noch nicht gespielt</div>
+                      <div style={{fontSize:13,color:"rgba(255,255,255,.4)"}}>{f1} vs {f2} · {toTime(finaleStart)}</div>
+                    </>
+                  ):(
+                    <>
+                      <div style={{fontSize:48,marginBottom:8}}>⚽</div>
+                      <div style={{fontSize:15,fontWeight:600,color:"rgba(255,255,255,.8)",marginBottom:6}}>Vorrunde läuft noch</div>
+                      <div style={{fontSize:13,color:"rgba(255,255,255,.4)"}}>{doneGames} von {totalGames} Spielen</div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="viewer-card" style={{padding:14}}>
+          <div style={{fontSize:10,fontWeight:600,color:"rgba(255,255,255,.4)",textTransform:"uppercase",letterSpacing:.8,marginBottom:12}}>Alle Klassenstufen</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {activeLevels.map(l=>{
+              const lvl=LEVELS.find(x=>x.id===l.id);
+              const lSt=standings[l.id]||[],lSc=scores[l.id]||{},lFsc=fScores[l.id]||{};
+              const lTbs=tbScores?.[l.id]||{},lPs=penScores?.[l.id]||{};
+              const lTbInfo=tiebreakerInfo?.[l.id],lS=schedule[l.id];
+              const fOkL=lFsc.h!=null&&lFsc.h!==""&&lFsc.a!=null&&lFsc.a!=="";
+              const lAllDone=lS&&lS.games.every(g=>{const r=lSc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";});
+              const{f1:lf1,f2:lf2}=getFinalists(lAllDone?lSt:null,lAllDone?lTbInfo:null,lTbs,lPs);
+              const lWinner=fOkL?(+lFsc.h>+lFsc.a?lf1:+lFsc.h<+lFsc.a?lf2:null):(!lS?.hasFinale&&lAllDone)?lSt[0]?.name:null;
+              const lDoneG=lS?lS.games.filter(g=>{const r=lSc[g.id];return r&&r.h!=null&&r.h!==""&&r.a!=null&&r.a!=="";}).length:0;
+              const lTotalG=lS?.games.length||0;
+              return(
+                <div key={l.id} onClick={()=>{setSelLvl(l.id);setViewTab("winner");}}
+                  style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,background:curLvl===l.id?"rgba(255,255,255,.1)":"rgba(255,255,255,.04)",border:`1px solid ${curLvl===l.id?"rgba(255,255,255,.2)":"rgba(255,255,255,.06)"}`,cursor:"pointer"}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:lvl.hue,flexShrink:0}}/>
+                  <span style={{fontSize:12,fontWeight:500,color:"rgba(255,255,255,.8)",flex:1}}>{lvl.label}</span>
+                  {lWinner?<span style={{fontSize:12,fontWeight:700,color:"#fbbf24"}}>🥇 {lWinner}</span>:<span style={{fontSize:11,color:"rgba(255,255,255,.35)"}}>{lDoneG}/{lTotalG}</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{textAlign:"center",marginTop:20,fontSize:11,color:"rgba(255,255,255,.25)"}}>Live-Ansicht · Echtzeit-Update via Firebase · 27. Juni 2026</div>
+      </div>
+    </div>
+  );
+}
+
+function Root(){
+  const[fbReady,setFbReady]=useState(FB_READY);
+  if(!fbReady){
+    // Setup-Screen erst anzeigen, dann splash ausblenden
+    document.getElementById("splash").style.display="none";
+    document.getElementById("root").style.display="block";
+    return <FirebaseSetup onDone={()=>setFbReady(true)}/>;
+  }
+  return <App/>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>
